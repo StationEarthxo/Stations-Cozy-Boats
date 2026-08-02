@@ -1,0 +1,331 @@
+package com.cozyboats;
+
+import java.awt.BorderLayout;
+import java.awt.Color;
+import java.awt.Dimension;
+import java.awt.GridLayout;
+import java.awt.image.BufferedImage;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import javax.swing.BorderFactory;
+import javax.swing.Box;
+import javax.swing.BoxLayout;
+import javax.swing.ImageIcon;
+import javax.swing.JButton;
+import javax.swing.JComboBox;
+import javax.swing.JLabel;
+import javax.swing.JOptionPane;
+import javax.swing.JPanel;
+import javax.swing.JScrollPane;
+import javax.swing.JTextField;
+import javax.swing.SwingConstants;
+import javax.swing.SwingUtilities;
+import javax.swing.Timer;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
+import net.runelite.client.ui.ColorScheme;
+import net.runelite.client.ui.PluginPanel;
+
+final class WorldBuilderPanel extends PluginPanel
+{
+    private static final int PREVIEW_SIZE = 91;
+    private static final int ICON_CACHE_SIZE = 250;
+    private static final int RESULT_PAGE_SIZE = 24;
+
+    private final WorldBuilderPlugin plugin;
+    private final JTextField search = new JTextField();
+    private final JComboBox<String> catalogueType = new JComboBox<>(
+        new String[]{"All decorations", "Static objects", "Animated", "Animated objects", "Animated NPCs"});
+    private final JComboBox<PlacementMode> placementMode = new JComboBox<>(PlacementMode.values());
+    private final JComboBox<PlacementScale> placementScale = new JComboBox<>(PlacementScale.values());
+    private final JComboBox<PlacementHeight> placementHeight = new JComboBox<>(PlacementHeight.values());
+    private final JComboBox<PlacementRotation> placementRotation = new JComboBox<>(PlacementRotation.values());
+    private final JLabel boatStatus = new JLabel("Board your boat to decorate", SwingConstants.CENTER);
+    private final JLabel status = new JLabel("Loading object catalogue…");
+    private final JPanel results = new JPanel(new GridLayout(0, 2, 5, 5));
+    private final JScrollPane resultsScroll = new JScrollPane(results);
+    private final JButton previousPage = new JButton("\u25C0");
+    private final JButton nextPage = new JButton("\u25B6");
+    private final JButton undoButton = new JButton("Undo");
+    private final JButton deleteAllButton = new JButton("Delete All");
+    private final JLabel pageStatus = new JLabel("0 matches", SwingConstants.CENTER);
+    private int placementCount;
+    private final Timer searchTimer;
+    private volatile int resultGeneration;
+    private List<CatalogEntry> currentResults = Collections.emptyList();
+    private int currentPage;
+    private boolean currentResultsComplete;
+    private final Map<String, ImageIcon> iconCache = new LinkedHashMap<String, ImageIcon>(ICON_CACHE_SIZE, .75f, true)
+    {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, ImageIcon> eldest)
+        {
+            return size() > ICON_CACHE_SIZE;
+        }
+    };
+
+    WorldBuilderPanel(WorldBuilderPlugin plugin)
+    {
+        this.plugin = plugin;
+        setLayout(new BorderLayout(0, 6));
+        setBackground(ColorScheme.DARK_GRAY_COLOR);
+
+        JPanel header = new JPanel(new BorderLayout(0, 5));
+        header.setBackground(ColorScheme.DARK_GRAY_COLOR);
+        JLabel title = new JLabel("STATION'S COZY BOATS", SwingConstants.CENTER);
+        title.setForeground(Color.WHITE);
+        boatStatus.setForeground(new Color(255, 190, 100));
+        JPanel titleArea = new JPanel(new GridLayout(0, 1, 0, 3));
+        titleArea.setBackground(ColorScheme.DARK_GRAY_COLOR);
+        titleArea.add(title);
+        titleArea.add(boatStatus);
+        header.add(titleArea, BorderLayout.NORTH);
+        search.setToolTipText("Search by decoration name, source ID, or animation ID");
+        JPanel searchArea = new JPanel();
+        searchArea.setLayout(new BoxLayout(searchArea, BoxLayout.Y_AXIS));
+        searchArea.setBackground(ColorScheme.DARK_GRAY_COLOR);
+        catalogueType.setMaximumSize(new Dimension(Integer.MAX_VALUE, catalogueType.getPreferredSize().height));
+        searchArea.add(catalogueType);
+        searchArea.add(Box.createVerticalStrut(4));
+        placementMode.setSelectedItem(plugin.getPlacementMode());
+        placementMode.setToolTipText("Choose how the cursor ghost snaps within the selected tile");
+        placementMode.setMaximumSize(new Dimension(Integer.MAX_VALUE, placementMode.getPreferredSize().height));
+        searchArea.add(placementMode);
+        searchArea.add(Box.createVerticalStrut(4));
+        JPanel presets = new JPanel(new GridLayout(0, 2, 4, 4));
+        presets.setBackground(ColorScheme.DARK_GRAY_COLOR);
+        presets.add(new JLabel("Size"));
+        placementScale.setSelectedItem(plugin.getPlacementScale());
+        placementScale.setToolTipText("Size for newly selected boat decorations");
+        presets.add(placementScale);
+        presets.add(new JLabel("Height"));
+        placementHeight.setSelectedItem(plugin.getPlacementHeight());
+        placementHeight.setToolTipText("Height for newly selected boat decorations");
+        presets.add(placementHeight);
+        presets.add(new JLabel("Rotation"));
+        placementRotation.setSelectedItem(plugin.getPlacementRotation());
+        placementRotation.setToolTipText("Starting rotation for newly selected boat decorations");
+        presets.add(placementRotation);
+        presets.setMaximumSize(new Dimension(Integer.MAX_VALUE, presets.getPreferredSize().height));
+        searchArea.add(presets);
+        searchArea.add(Box.createVerticalStrut(4));
+        search.setMaximumSize(new Dimension(Integer.MAX_VALUE, search.getPreferredSize().height));
+        searchArea.add(search);
+        header.add(searchArea, BorderLayout.CENTER);
+        status.setForeground(Color.LIGHT_GRAY);
+        status.setHorizontalAlignment(SwingConstants.CENTER);
+        header.add(status, BorderLayout.SOUTH);
+        add(header, BorderLayout.NORTH);
+
+        results.setBackground(ColorScheme.DARK_GRAY_COLOR);
+        resultsScroll.setBorder(null);
+        resultsScroll.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+        resultsScroll.getVerticalScrollBar().setUnitIncrement(24);
+        add(resultsScroll, BorderLayout.CENTER);
+
+        JPanel pager = new JPanel(new BorderLayout(5, 0));
+        pager.setBackground(ColorScheme.DARK_GRAY_COLOR);
+        previousPage.setToolTipText("Previous results page");
+        nextPage.setToolTipText("Next results page");
+        previousPage.addActionListener(event -> changePage(-1));
+        nextPage.addActionListener(event -> changePage(1));
+        pageStatus.setForeground(Color.LIGHT_GRAY);
+        pager.add(previousPage, BorderLayout.WEST);
+        pager.add(pageStatus, BorderLayout.CENTER);
+        pager.add(nextPage, BorderLayout.EAST);
+        JPanel actions = new JPanel(new GridLayout(1, 2, 5, 0));
+        actions.setBackground(ColorScheme.DARK_GRAY_COLOR);
+        undoButton.setToolTipText("Undo the last build change (Ctrl+Z while this panel is open)");
+        deleteAllButton.setToolTipText("Delete every placed decoration after confirmation");
+        deleteAllButton.setForeground(new Color(255, 130, 130));
+        undoButton.addActionListener(event -> plugin.undoLastChange());
+        deleteAllButton.addActionListener(event -> confirmDeleteAll());
+        actions.add(undoButton);
+        actions.add(deleteAllButton);
+
+        JPanel footer = new JPanel(new BorderLayout(0, 5));
+        footer.setBackground(ColorScheme.DARK_GRAY_COLOR);
+        footer.add(pager, BorderLayout.NORTH);
+        footer.add(actions, BorderLayout.SOUTH);
+        add(footer, BorderLayout.SOUTH);
+
+        searchTimer = new Timer(220, event -> runSearch());
+        searchTimer.setRepeats(false);
+        search.getDocument().addDocumentListener(new DocumentListener()
+        {
+            @Override public void insertUpdate(DocumentEvent event) { searchTimer.restart(); }
+            @Override public void removeUpdate(DocumentEvent event) { searchTimer.restart(); }
+            @Override public void changedUpdate(DocumentEvent event) { searchTimer.restart(); }
+        });
+        catalogueType.addActionListener(event -> runSearch());
+        placementMode.addActionListener(event ->
+            plugin.setPlacementMode((PlacementMode) placementMode.getSelectedItem()));
+        placementScale.addActionListener(event ->
+            plugin.setPlacementScale((PlacementScale) placementScale.getSelectedItem()));
+        placementHeight.addActionListener(event ->
+            plugin.setPlacementHeight((PlacementHeight) placementHeight.getSelectedItem()));
+        placementRotation.addActionListener(event ->
+            plugin.setPlacementRotation((PlacementRotation) placementRotation.getSelectedItem()));
+    }
+
+    void setBuildActionState(boolean canUndo, int count)
+    {
+        SwingUtilities.invokeLater(() ->
+        {
+            placementCount = count;
+            undoButton.setEnabled(canUndo);
+            deleteAllButton.setEnabled(count > 0);
+            deleteAllButton.setText(count > 0 ? "Delete All (" + count + ")" : "Delete All");
+        });
+    }
+
+    void setBoatAvailable(boolean available)
+    {
+        SwingUtilities.invokeLater(() ->
+        {
+            boatStatus.setText(available ? "Boat found - ready to decorate" : "Board your boat to decorate");
+            boatStatus.setForeground(available ? new Color(140, 225, 150) : new Color(255, 190, 100));
+        });
+    }
+
+    private void confirmDeleteAll()
+    {
+        if (placementCount <= 0)
+        {
+            return;
+        }
+        int result = JOptionPane.showConfirmDialog(
+            SwingUtilities.getWindowAncestor(this),
+            "Delete all " + placementCount + " placed decorations?\n\n"
+                + "This can be recovered immediately with Undo.",
+            "Delete every Cozy Boats decoration?",
+            JOptionPane.YES_NO_OPTION,
+            JOptionPane.WARNING_MESSAGE);
+        if (result == JOptionPane.YES_OPTION)
+        {
+            plugin.deleteAllPlacements();
+        }
+    }
+
+    void setCatalogueProgress(int loaded, int total)
+    {
+        SwingUtilities.invokeLater(() -> status.setText(total <= 0 ? "Loading..."
+            : loaded + " / " + total + " definitions scanned"));
+    }
+
+    void catalogueReady(int count)
+    {
+        SwingUtilities.invokeLater(() ->
+        {
+            status.setText(count + " decorations loaded - type to search");
+            runSearch();
+        });
+    }
+
+    void catalogueWaitingForCache()
+    {
+        SwingUtilities.invokeLater(() -> status.setText("Waiting for the game cache..."));
+    }
+
+    void showResults(List<CatalogEntry> entries, boolean complete)
+    {
+        SwingUtilities.invokeLater(() ->
+        {
+            currentResults = entries;
+            currentResultsComplete = complete;
+            currentPage = 0;
+            renderResultPage();
+        });
+    }
+
+    private void changePage(int offset)
+    {
+        int pageCount = Math.max(1, (currentResults.size() + RESULT_PAGE_SIZE - 1) / RESULT_PAGE_SIZE);
+        int requestedPage = Math.max(0, Math.min(pageCount - 1, currentPage + offset));
+        if (requestedPage == currentPage)
+        {
+            return;
+        }
+        currentPage = requestedPage;
+        renderResultPage();
+    }
+
+    private void renderResultPage()
+    {
+        final int generation = ++resultGeneration;
+        results.removeAll();
+
+        int pageCount = Math.max(1, (currentResults.size() + RESULT_PAGE_SIZE - 1) / RESULT_PAGE_SIZE);
+        int start = currentPage * RESULT_PAGE_SIZE;
+        int end = Math.min(currentResults.size(), start + RESULT_PAGE_SIZE);
+        for (int i = start; i < end; i++)
+        {
+            CatalogEntry entry = currentResults.get(i);
+            String detail = entry.isAnimated()
+                ? entry.sourceLabel() + " " + entry.sourceId() + " \u2022 Anim " + entry.animationId
+                : "Object #" + entry.objectId;
+            String label = entry.isNpc() && entry.animationName != null
+                ? entry.name + " \u2014 " + entry.animationName : entry.name;
+            JButton button = new JButton("<html><center>" + escape(label)
+                + "<br><small>" + escape(detail) + "</small></center></html>");
+            button.setHorizontalTextPosition(SwingConstants.CENTER);
+            button.setVerticalTextPosition(SwingConstants.BOTTOM);
+            button.setPreferredSize(new Dimension(101, 128));
+            button.setToolTipText(label + " (" + detail + ")");
+            button.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+            button.setBorder(BorderFactory.createLineBorder(ColorScheme.MEDIUM_GRAY_COLOR));
+            button.addActionListener(event -> plugin.selectCatalogueEntry(entry));
+            ImageIcon cached = iconCache.get(entry.cacheKey());
+            if (cached != null)
+            {
+                button.setIcon(cached);
+            }
+            else
+            {
+                plugin.requestPreview(entry, generation, image ->
+                {
+                    if (image != null && generation == resultGeneration)
+                    {
+                        ImageIcon icon = new ImageIcon(image);
+                        iconCache.put(entry.cacheKey(), icon);
+                        button.setIcon(icon);
+                    }
+                });
+            }
+            results.add(button);
+        }
+
+        if (currentResults.isEmpty())
+        {
+            JLabel empty = new JLabel(currentResultsComplete ? "No matching objects" : "Catalogue is still loading…", SwingConstants.CENTER);
+            empty.setForeground(Color.LIGHT_GRAY);
+            results.add(empty);
+        }
+
+        previousPage.setEnabled(currentPage > 0);
+        nextPage.setEnabled(currentPage + 1 < pageCount);
+        pageStatus.setText(currentResults.isEmpty()
+            ? "0 matches"
+            : (currentPage + 1) + " / " + pageCount + " - " + currentResults.size() + " matches");
+        results.revalidate();
+        results.repaint();
+        SwingUtilities.invokeLater(() -> resultsScroll.getVerticalScrollBar().setValue(0));
+    }
+
+    boolean isPreviewGenerationCurrent(int generation)
+    {
+        return generation == resultGeneration;
+    }
+
+    private void runSearch()
+    {
+        plugin.searchCatalogue(search.getText(), catalogueType.getSelectedIndex());
+    }
+
+    private static String escape(String text)
+    {
+        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
+    }
+}

@@ -1,0 +1,6 @@
+.gradle/
+build/
+.idea/
+*.iml
+cozy-boats-run.log
+cozy-boats-run-error.log
